@@ -6,8 +6,6 @@ import {
 import {Chain, JsonPath,} from "aws-cdk-lib/aws-stepfunctions";
 import {CallAwsService} from "aws-cdk-lib/aws-stepfunctions-tasks";
 import {PolicyStatement, Role, ServicePrincipal} from "aws-cdk-lib/aws-iam";
-import * as Path from "path";
-import * as path from "path";
 
 export class S3StepfunctionsTranscriptionStack extends cdk.Stack {
 	constructor(scope: Construct, id: string, props?: cdk.StackProps) {
