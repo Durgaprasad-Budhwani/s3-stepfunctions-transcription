@@ -3,7 +3,7 @@ import {Construct} from 'constructs';
 import {
 	S3ToStepfunctions,
 } from '@aws-solutions-constructs/aws-s3-stepfunctions';
-import {Chain, JsonPath,} from "aws-cdk-lib/aws-stepfunctions";
+import {Chain, Choice, Condition, Fail, JsonPath, Pass, Wait, WaitTime,} from "aws-cdk-lib/aws-stepfunctions";
 import {CallAwsService} from "aws-cdk-lib/aws-stepfunctions-tasks";
 import {PolicyStatement, Role, ServicePrincipal} from "aws-cdk-lib/aws-iam";
 
@@ -11,9 +11,37 @@ export class S3StepfunctionsTranscriptionStack extends cdk.Stack {
 	constructor(scope: Construct, id: string, props?: cdk.StackProps) {
 		super(scope, id, props);
 		
-		let bucketKeyName = JsonPath.stringAt("$.detail.object.key");
-		const transcriptionService = new CallAwsService(this, 'transcribe', {
+		const bucketKeyName = JsonPath.stringAt("$.detail.object.key");
+		const waitFor10Seconds = new Wait(this, 'WaitFor10Seconds', {
+			time: WaitTime.duration(cdk.Duration.seconds(10)),
+		});
+		
+		const transcriptionPolicy = new PolicyStatement({
+			actions: ['s3:*'],
+			resources: ['arn:aws:s3:::s3-sf-transcription-bucket1/*'],
+		});
+		
+		const checkTranscriptionStatus = new CallAwsService(this, 'checkTranscriptionStatus', {
 			service: 'transcribe',
+			comment: "Check transcription job status",
+			action: 'getTranscriptionJob',
+			parameters: {
+				"TranscriptionJobName.$": "$.TranscriptionJob.TranscriptionJobName"
+			},
+			resultSelector: {
+				"TranscriptionJobStatus.$": "$.TranscriptionJob.TranscriptionJobStatus",
+				"TranscriptionJobName.$": "$.TranscriptionJob.TranscriptionJobName"
+			},
+			resultPath: "$.TranscriptionJob",
+			additionalIamStatements: [
+				transcriptionPolicy,
+			],
+			iamResources: ['*'],
+		});
+		
+		const startTranscriptionService = new CallAwsService(this, 'startTranscriptionJob', {
+			service: 'transcribe',
+			comment: "Start transcription job",
 			action: 'startTranscriptionJob',
 			parameters: {
 				Media: {
@@ -30,12 +58,24 @@ export class S3StepfunctionsTranscriptionStack extends cdk.Stack {
 			},
 			iamResources: ['*'],
 			additionalIamStatements: [
-				new PolicyStatement({
-					actions: ['s3:*'],
-					resources: ['arn:aws:s3:::s3-sf-transcription-bucket1/*'],
-				}),
-			]
+				transcriptionPolicy,
+			],
 		});
+		
+		const pass = new Pass(this, 'Pass', {
+			comment: "Transcription job successfully completed",
+		});
+		
+		const failed = new Fail(this, 'Failed', {
+			comment: "Transcription job failed",
+		})
+		
+		const checkTranscriptionStatusChoice = new Choice(this, 'CheckTranscriptionStatusChoice', {
+			comment: "Check transcription job status",
+		});
+		checkTranscriptionStatusChoice.when(Condition.stringEquals('$.TranscriptionJob.TranscriptionJobStatus', 'COMPLETED'), pass);
+		checkTranscriptionStatusChoice.when(Condition.stringEquals('$.TranscriptionJob.TranscriptionJobStatus', 'FAILED'), failed);
+		checkTranscriptionStatusChoice.otherwise(waitFor10Seconds);
 		
 		const stepFunctionRole = new Role(this, 'StepFunctionRole', {
 			assumedBy: new ServicePrincipal('states.amazonaws.com'),
@@ -49,7 +89,12 @@ export class S3StepfunctionsTranscriptionStack extends cdk.Stack {
 		new S3ToStepfunctions(this, `s3-stepfunctions-transcription`, {
 			stateMachineProps: {
 				stateMachineName: `s3-stepfunctions-transcription`,
-				definition: Chain.start(transcriptionService),
+				definition: Chain
+					.start(startTranscriptionService)
+					.next(waitFor10Seconds)
+					.next(checkTranscriptionStatus)
+					.next(checkTranscriptionStatusChoice)
+					,
 				role: stepFunctionRole,
 			},
 			bucketProps: {
